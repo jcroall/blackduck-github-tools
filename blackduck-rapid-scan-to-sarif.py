@@ -114,6 +114,10 @@ for item in dev_scan_data['items']:
 
     upgrade_version = component_upgrade_data['longTerm']['versionName']
 
+    # TODO: Process BDIO file from blackduck output directory to build
+    # dependency graph, use NetworkX for Python, locate package node and
+    # then use networkx.DiGraph.predecessors to access parents.
+
     package_file = get_package_file(bd, item['componentIdentifier'], item['componentName'])
 
     # Loop through polciy violations and append to SARIF output data
