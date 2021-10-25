@@ -117,6 +117,9 @@ for item in dev_scan_data['items']:
     # TODO: Process BDIO file from blackduck output directory to build
     # dependency graph, use NetworkX for Python, locate package node and
     # then use networkx.DiGraph.predecessors to access parents.
+    #
+    # Use hub-rest-api-python/examples/bdio_update_project_name.py as
+    # a reference.
 
     package_file = get_package_file(bd, item['componentIdentifier'], item['componentName'])
 
