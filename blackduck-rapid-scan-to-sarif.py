@@ -7,7 +7,12 @@ import argparse
 import json
 import glob
 import hashlib
+import zipfile
+from zipfile import ZIP_DEFLATED
 from pprint import pprint
+
+import networkx as nx
+import matplotlib.pyplot as plt
 
 from blackduck import Client
 
@@ -39,6 +44,25 @@ def get_package_file(bd, component_identifier, component_name):
 
     return "Unknown"
 
+def read_json_object(filepath):
+    with open(filepath) as jsonfile:
+        data = json.load(jsonfile)
+        return data
+
+def zip_extract_files(zip_file, dir_name):
+    print("Extracting content of {} into {}".format(zip_file, dir_name))
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        zip_ref.extractall(dir_name)
+
+def bdio_read(bdio_in, inputdir):
+    zip_extract_files(bdio_in, inputdir)
+    filelist = os.listdir(inputdir)
+    for filename in filelist:
+        #print ("processing {}".format(filename))
+        filepath_in = os.path.join(inputdir, filename)
+        data = read_json_object(filepath_in)
+        return data
+
 # Parse command line arguments
 parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
                 description='Generate GitHub SARIF file from Black Duck Rapid Scan')
@@ -58,6 +82,59 @@ sarif_output_file = args.output
 bd = Client(token=bd_apitoken,
         base_url=bd_url,
         timeout=300)
+
+# Parse BDIO file into network graph
+#bd_rapid_output_bdio_glob = glob.glob(bd_rapid_output_dir + "/runs/*/bdio/*.bdio")
+#if (len(bd_rapid_output_bdio_glob) == 0):
+#    print("ERORR: Unable to find output scan files in: " + bd_rapid_output_dir + "/runs/*/bdio/*.bdio")
+#    sys.exit(1)
+#
+#bd_rapid_output_bdio = bd_rapid_output_bdio_glob[0]
+#
+#bd_rapid_output_bdio_dir = glob.glob(bd_rapid_output_dir + "/runs/*/bdio")[0]
+#bdio_data = bdio_read(bd_rapid_output_bdio, bd_rapid_output_bdio_dir)
+#if (debug):
+#    print(f"DEBUG: BDIO Dump: "+ json.dumps(bdio_data, indent=4))
+#
+## Construct dependency graph
+#G = nx.DiGraph()
+##G.add_edges_from(
+##            [('project', 'express-handlebars'), ('project', 'nodemailer'), ('express-handlebars', 'anotherone'), ('express-handlebars', 'handlebars')])
+#
+#if (debug): print("DEBUG: Create dependency graph...")
+#for node in bdio_data['@graph']:
+#    parent = node['@id']
+#    G.add_edge("Project", parent)
+#    if (debug): print(f"DEBUG: Parent {parent}")
+#    if "https://blackducksoftware.github.io/bdio#hasDependency" in node:
+#        if (isinstance(node['https://blackducksoftware.github.io/bdio#hasDependency'], list)):
+#            for dependency in node['https://blackducksoftware.github.io/bdio#hasDependency']:
+#                child = dependency['https://blackducksoftware.github.io/bdio#dependsOn']['@id']
+#                if (debug): print(f"DEBUG:   Dependency on {child}")
+#                G.add_edge(parent, child)
+#        else:
+#            child = dependency['https://blackducksoftware.github.io/bdio#dependsOn']['@id']
+#            if (debug): print(f"DEBUG:   Dependency on {child}")
+#            G.add_edge(parent, child)
+#
+#if (debug):
+#    map = nx.to_dict_of_dicts(G)
+#    print(f"DEBUG: Dump graph")
+#    print(json.dumps(map, indent=4))
+#
+#    #nx.draw(G)
+#    #plt.savefig("filename.png")
+#
+#    an = nx.ancestors(G, "http:npmjs/commander/2.20.3")
+#    print("DEBUG: Ancestors:")
+#    print(an)
+#
+#    paths = nx.all_simple_paths(G, source="Project", target="http:npmjs/commander/2.20.3")
+#    print("DEBUG: Paths to 'http:npmjs/commander/2.20.3'")
+#    for path in paths:
+#        print(path)
+#
+#sys.exit(1)
 
 # Parse the Rapid Scan output, assuming there is only one run in the directory
 bd_rapid_output_file_glob = glob.glob(bd_rapid_output_dir + "/runs/*/scan/*.json")
@@ -157,7 +234,7 @@ for item in dev_scan_data['items']:
         elif (vuln['vulnSeverity'] == "MEDIUM"):
             efaultConfiguration['level'] = "warning"
         else:
-            defaultConfiguration['level'] = "recommendation"
+            defaultConfiguration['level'] = "note"
 
         tool_rule['defaultConfiguration'] = defaultConfiguration
         properties = dict()
@@ -185,32 +262,34 @@ for item in dev_scan_data['items']:
         partialFingerprints['primaryLocationLineHash'] = primaryLocationLineHash
         result['partialFingerprints'] = partialFingerprints
 
+        print("RESULTS ADD")
         results.append(result)
 
-    run['results'] = results
-    runs.append(run)
+run['results'] = results
+print("RESULTS SIZE: ")
+print(len(results))
+runs.append(run)
 
-    tool = dict()
-    driver = dict()
-    driver['name'] = "Synopsys Black Duck"
-    driver['organization'] = "Synopsys"
-    driver['rules'] = tool_rules
-    tool['driver'] = driver
-    run['tool'] = tool
+tool = dict()
+driver = dict()
+driver['name'] = "Synopsys Black Duck"
+driver['organization'] = "Synopsys"
+driver['rules'] = tool_rules
+tool['driver'] = driver
+run['tool'] = tool
 
-    code_security_scan_report = dict()
-    code_security_scan_report['runs'] = runs
-    code_security_scan_report['$schema'] = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
-    code_security_scan_report['version'] = "2.1.0"
-    code_security_scan_report['runs'] = runs
+code_security_scan_report = dict()
+code_security_scan_report['runs'] = runs
+code_security_scan_report['$schema'] = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+code_security_scan_report['version'] = "2.1.0"
+code_security_scan_report['runs'] = runs
 
-    if (debug):
-        print("DEBUG: SARIF Data structure=" + json.dumps(code_security_scan_report, indent=4))
-    with open(sarif_output_file, "w") as fp:
-              json.dump(code_security_scan_report, fp, indent=4)
+if (debug):
+    print("DEBUG: SARIF Data structure=" + json.dumps(code_security_scan_report, indent=4))
+with open(sarif_output_file, "w") as fp:
+    json.dump(code_security_scan_report, fp, indent=4)
 
-    # For debugging one by one
-    #sys.exit(1)
-
+# For debugging one by one
+#sys.exit(1)
 
 print("Done")
