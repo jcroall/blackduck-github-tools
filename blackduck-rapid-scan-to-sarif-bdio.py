@@ -11,7 +11,6 @@ import zipfile
 import re
 import shutil
 import random
-from pathlib import Path
 from zipfile import ZIP_DEFLATED
 from pprint import pprint
 from github import Github
@@ -204,8 +203,7 @@ for detector in output_status_data['detectors']:
     for explanation in reversed(detector['explanations']):
         if (str.startswith(explanation, "Found file: ")):
             package_file = explanation[len("Found file: "):]
-            path = Path(package_file)
-            if (path.is_file()): 
+            if (os.path.isfile(package_file)):
                 detected_package_files.append(package_file)
                 if (debug): print(f"DEBUG: Explanation: {explanation} File: {package_file}")
 
