@@ -22,11 +22,81 @@ import matplotlib.pyplot as plt
 from blackduck import Client
 
 def line_num_for_phrase_in_file(phrase, filename):
-    with open(filename,'r') as f:
-        for (i, line) in enumerate(f):
-            if phrase.lower() in line.lower():
-                return i
+    try:
+        with open(filename,'r') as f:
+            for (i, line) in enumerate(f):
+                if phrase.lower() in line.lower():
+                    return i
+    except:
+        return -1
     return -1
+
+def remove_cwd_from_filename(path):
+    cwd = os. getcwd()
+    cwd = cwd + "/"
+    new_filename = path.replace(cwd, "")
+    return new_filename
+
+def github_create_pull_request_comment(g, github_repo, pr, pr_commit, fix_pr_node):
+    if (debug): print(f"DEBUG: Look up GitHub repo '{github_repo}'")
+    repo = g.get_repo(github_repo)
+    if (debug): print(repo)
+
+    body = f'''
+Synopsys Black Duck found the following vulerabilities in the component {fix_pr_node['componentName']}:
+
+'''
+    body = body + "\n".join(fix_pr_node['comments'])
+
+    if (debug): print(f"DEBUG: Get issue for pull request #{pr.number}")
+    issue = repo.get_issue(number = pr.number)
+    if (debug): print(issue)
+
+    if (debug): print(f"DEBUG: Create pull request review comment for pull request #{pr.number} with the following body:\n{body}")
+    issue.create_comment(body)
+
+def github_commit_file_and_create_fixpr(g, github_token, github_api_url, github_repo, github_branch, fix_pr_filename, local_filename, fix_pr_node):
+    if (debug): print(f"DEBUG: Look up GitHub repo '{github_repo}'")
+    repo = g.get_repo(github_repo)
+    if (debug): print(repo)
+
+    if (debug): print(f"DEBUG: Get HEAD commit from '{github_repo}'")
+    commit = repo.get_commit('HEAD')
+    if (debug): print(commit)
+
+    new_branch_seed = secrets.token_hex(15)
+    new_branch_name = github_branch + "-snps-fix-pr-" + new_branch_seed
+    if (debug): print(f"DEBUG: Create branch '{new_branch_name}'")
+    ref = repo.create_git_ref("refs/heads/" + new_branch_name, commit.sha)
+    if (debug): print(ref)
+
+    fix_comments = "\n".join(fix_pr_node['comments'])
+    commit_message = f"Update {fix_pr_node['componentName']} to fix the following known security vulnerabilities:\n\n" + fix_comments
+
+    if (debug): print(f"DEBUG: Get SHA for file '{fix_pr_filename}'")
+    file = repo.get_contents(fix_pr_filename)
+
+    if (debug): print(f"DEBUG: Upload file '{fix_pr_filename}'")
+    try:
+        with open(local_filename, 'r') as fp:
+            file_contents = fp.read()
+    except:
+        print(f"ERROR: Unable to open package file '{local_filename}'")
+        sys.exit(1)
+
+    if (debug): print(f"DEBUG: Update file '{fix_pr_filename}' with commit message '{commit_message}'")
+    file = repo.update_file(fix_pr_filename, commit_message, file_contents, file.sha, branch=new_branch_name)
+
+    pr_body = f'''
+Pull request submitted by Synopsys Black Duck to upgrade {fix_pr_node['componentName']} from version {fix_pr_node['versionFrom']} to {fix_pr_node['versionTo']} in order to fix the known security vulnerabilities:
+
+'''
+    pr_body = pr_body + "\n".join(fix_pr_node['comments'])
+    if (debug):
+        print(f"DEBUG: Submitting pull request:")
+        print(pr_body)
+    pr = repo.create_pull(title=f"Black Duck: Upgrade {fix_pr_node['componentName']} to version {fix_pr_node['versionTo']} fix known security vulerabilities", body=pr_body, head=new_branch_name, base="master")
+
 
 def detect_package_file(package_files, component_identifier, component_name):
     ptype = component_identifier.split(':')[0]
@@ -39,9 +109,13 @@ def detect_package_file(package_files, component_identifier, component_name):
 
     return "Unknown"
 
-def generate_fix_pr_npmjs(filename, component_name, version_from, version_to):
-    with open(filename) as jsonfile:
-        data = json.load(jsonfile)
+def generate_fix_pr_npmjs(filename, filename_local, component_name, version_from, version_to):
+    try:
+        with open(filename) as jsonfile:
+            data = json.load(jsonfile)
+    except:
+        print(f"ERROR: Unable to open package file '{filename}'")
+        sys.exit(1)
 
     if (debug): print(f"DEBUG: Searching {filename} for component '{component_name}' ...")
     for dependency in data['dependencies'].keys():
@@ -50,11 +124,15 @@ def generate_fix_pr_npmjs(filename, component_name, version_from, version_to):
             data['dependencies'][dependency] = "^" + version_to
 
     # Attempt to preserve NPM formatting by not sorting and using indent=2
-    if (debug): print(f"DEBUG:   Writing changes to {filename}")
-    with open(filename, "w") as jsonfile:
-        json.dump(data, jsonfile, indent=2)
+    if (debug): print(f"DEBUG:   Writing changes to {filename_local}")
+    try:
+        with open(filename_local, "w") as jsonfile:
+            json.dump(data, jsonfile, indent=2)
+    except:
+        print(f"ERROR: Unable to write package file '{filename_local}'")
+        sys.exit(1)
 
-    return filename
+    return filename, filename_local
 
 def read_json_object(filepath):
     with open(filepath) as jsonfile:
@@ -82,7 +160,10 @@ parser.add_argument('--debug', default=0, help='set debug level [0-9]')
 parser.add_argument('--url', required=True, help='Black Duck Base URL')
 parser.add_argument('--output_directory', required=True, help='Rapid Scan output directory')
 parser.add_argument('--output', required=True, help='File to output SARIF to')
+parser.add_argument('--upgrademajor', default=False, action='store_true', help='Upgrade beyond current major version')
 parser.add_argument('--fixpr', default=False, action='store_true', help='Create Fix PR for upgrade guidance')
+parser.add_argument('--comment', default=False, action='store_true', help='Comment on the pull request being scanned')
+
 args = parser.parse_args()
 
 debug = int(args.debug)
@@ -92,8 +173,10 @@ if (bd_apitoken == None or bd_apitoken == ""):
     sys.exit(1)
 bd_url = args.url
 bd_rapid_output_dir = args.output_directory
+upgrade_major = args.upgrademajor
 sarif_output_file = args.output
 fix_pr = args.fixpr
+comment_pr = args.comment
 
 fix_pr_annotation = ""
 
@@ -112,7 +195,7 @@ bd_rapid_output_status = bd_rapid_output_status_glob[0]
 
 print("INFO: Parsing Black Duck Rapid Scan output from " + bd_rapid_output_status)
 with open(bd_rapid_output_status) as f:
-        output_status_data = json.load(f)
+    output_status_data = json.load(f)
 
 if (debug): print(f"DEBUG: Status dump: " + json.dumps(output_status_data, indent=4))
 
@@ -253,8 +336,14 @@ for item in dev_scan_data['items']:
     component_upgrade_data = bd.get_json(component_result['version'] + "/upgrade-guidance")
     if (debug): print("DEBUG: Compponent upgrade data=" + json.dumps(component_upgrade_data, indent=4) + "\n")
 
-    upgrade_version = component_upgrade_data['longTerm']['versionName']
-    
+    if (upgrade_major):
+        upgrade_version = component_upgrade_data['longTerm']['versionName']
+    else:
+        if ("shortTerm" in component_upgrade_data.keys()):
+            upgrade_version = component_upgrade_data['shortTerm']['versionName']
+        else:
+            upgrade_version = None
+
     # TODO: Process BDIO file from blackduck output directory to build
     # dependency graph, use NetworkX for Python, locate package node and
     # then use networkx.DiGraph.predecessors to access parents.
@@ -268,28 +357,32 @@ for item in dev_scan_data['items']:
     ptype = item['componentIdentifier'].split(':')[0]
     name_version = item['componentIdentifier'].split(':')[1]
     name = name_version.split('/')[0]
-    if (fix_pr and dependency_type == "Direct"):
+    if (dependency_type == "Direct" and upgrade_version != None):
         fix_pr_node = dict()
         fix_pr_node['componentName'] = name
         fix_pr_node['versionFrom'] = component_upgrade_data['versionName']
         fix_pr_node['versionTo'] = upgrade_version
         fix_pr_node['scheme'] = ptype
-        fix_pr_node['file'] = package_file
-        fix_pr_data.append(fix_pr_node)
+        fix_pr_node['filename'] = remove_cwd_from_filename(package_file)
+        fix_pr_node['comments'] = []
 
     # Loop through polciy violations and append to SARIF output data
     for vuln in item['policyViolationVulnerabilities']:
-        message = f"INFO: {vuln['name']} - {vuln['vulnSeverity']} severity vulnerability violates policy '{vuln['violatingPolicies'][0]['policyName']}': {vuln['description']} Recommended to upgrade to version {upgrade_version}. {dependency_type} dependency."
+        if (upgrade_version != None):
+            message = f"* {vuln['name']} - {vuln['vulnSeverity']} severity vulnerability violates policy '{vuln['violatingPolicies'][0]['policyName']}': *{vuln['description']}* Recommended to upgrade to version {upgrade_version}. {dependency_type} dependency."
+        else:
+            message = f"* {vuln['name']} - {vuln['vulnSeverity']} severity vulnerability violates policy '{vuln['violatingPolicies'][0]['policyName']}': *{vuln['description']}* No upgrade available at this time. {dependency_type} dependency."
         if (dependency_type == "Direct"):
-            message = message + f" Fix in package file '{package_file}'"
+            message = message + f" Fix in package file '{remove_cwd_from_filename(package_file)}'"
         else:
             if (len(dependency_paths) > 0):
                 message = message + f" Find dependency in {dependency_paths[0]}"
 
-        if (fix_pr and dependency_type == "Direct"):
-            fix_pr_annotation = fix_pr_annotation + f"Fix {vuln['name']} ({vuln['vulnSeverity']} severity vulnerability) by upgrading {name} to {upgrade_version}\n"
+        print("INFO: " + message)
 
-        print(message)
+        # Save message to include in Fix PR
+        if (dependency_type == "Direct" and upgrade_version != None):
+            fix_pr_node['comments'].append(message)
 
         result = dict()
         result['ruleId'] = vuln['name']
@@ -312,7 +405,10 @@ for item in dev_scan_data['items']:
         tool_rule['fullDescription'] = fullDescription
         rule_help = dict()
         rule_help['text'] = ""
-        rule_help['markdown'] = f"*{vuln['description']} Recommended to upgrade to version {upgrade_version}. Fix in package file '{package_file}'*"
+        if (upgrade_version != None):
+            rule_help['markdown'] = f"*{vuln['description']} Recommended to upgrade to version {upgrade_version}. Fix in package file '{package_file}'*"
+        else:
+            rule_help['markdown'] = f"*{vuln['description']} No upgrade available at this time. Fix in package file '{package_file}'*"
         tool_rule['help'] = rule_help
         defaultConfiguration = dict()
 
@@ -351,6 +447,9 @@ for item in dev_scan_data['items']:
 
         results.append(result)
 
+        if (dependency_type == "Direct" and upgrade_version != None):
+            fix_pr_data.append(fix_pr_node)
+
 run['results'] = results
 runs.append(run)
 
@@ -370,33 +469,17 @@ code_security_scan_report['runs'] = runs
 
 if (debug):
     print("DEBUG: SARIF Data structure=" + json.dumps(code_security_scan_report, indent=4))
-with open(sarif_output_file, "w") as fp:
-    json.dump(code_security_scan_report, fp, indent=4)
+try:
+    with open(sarif_output_file, "w") as fp:
+        json.dump(code_security_scan_report, fp, indent=4)
+except:
+    print(f"ERROR: Unable to write to SARIF output file '{sarif_output_file}'")
+    sys.exit(1)
 
 # Optionally generate Fix PR
 
-fix_pr_files = dict()
 fix_pr_components = dict()
 if (fix_pr):
-    print("DEBUG: Generating Fix Pull Request")
-
-    for fix_pr_node in fix_pr_data:
-        print(f"DEBUG:  Fix '{fix_pr_node['componentName']}' version '{fix_pr_node['versionFrom']}' in file '{fix_pr_node['file']}' using scheme '{fix_pr_node['scheme']}' to version '{fix_pr_node['versionTo']}'")
-
-        if (fix_pr_node['scheme'] == "npmjs"):
-            # For safety
-            shutil.copy2("package.json", "package-orig.json")
-            fix_pr_filename = generate_fix_pr_npmjs(fix_pr_node['file'], fix_pr_node['componentName'], fix_pr_node['versionFrom'], fix_pr_node['versionTo'])
-            # Remove leading path from filename
-            cwd = os. getcwd()
-            cwd = cwd + "/"
-            fix_pr_filename = fix_pr_filename.replace(cwd, "")
-
-            fix_pr_files[fix_pr_filename] = 1
-            fix_pr_components[fix_pr_node['componentName']] = 1
-        else:
-            print(f"INFO: Generating a Fix PR for packages of type '{fix_pr_node['scheme']}' is not supported yet")
-
     github_token = os.getenv("GITHUB_TOKEN")
     github_repo = os.getenv("GITHUB_REPOSITORY")
     github_branch = os.getenv("GITHUB_REF")
@@ -409,45 +492,67 @@ if (fix_pr):
     if (debug): print(f"DEBUG: Connect to GitHub at {github_api_url}")
     g = Github(github_token, base_url=github_api_url)
 
-    if (debug): print(f"DEBUG: Look up GitHub repo '{github_repo}'")
-    repo = g.get_repo(github_repo)
+    print("DEBUG: Generating Fix Pull Request")
 
-    if (debug): print(f"DEBUG: Get HEAD commit from '{github_repo}'")
-    commit = repo.get_commit('HEAD')
+    for fix_pr_node in fix_pr_data:
+        if (debug): print(f"DEBUG:  Fix '{fix_pr_node['componentName']}' version '{fix_pr_node['versionFrom']}' in file '{fix_pr_node['filename']}' using scheme '{fix_pr_node['scheme']}' to version '{fix_pr_node['versionTo']}'")
 
-    new_branch_seed = secrets.token_hex(15)
-    new_branch_name = github_branch + "-snps-fix-pr-" + new_branch_seed
-    if (debug): print(f"DEBUG: Create branch '{new_branch_name}'")
-    ref = repo.create_git_ref("refs/heads/" + new_branch_name, commit.sha)
-
-    fix_components = ", ".join(fix_pr_components.keys())
-    commit_message = "Update the following components to fix known security vulnerabilities: " + fix_components
-
-    for fix_pr_file in fix_pr_files.keys():
-        if (debug): print(f"DEBUG: Get SHA for file '{fix_pr_file}'")
-        file = repo.get_contents(fix_pr_file)
-
-        if (debug): print(f"DEBUG: Upload file '{fix_pr_file}'")
-        with open(fix_pr_file, 'r') as fp:
-            file_contents = fp.read()
-        if (debug): print(f"DEBUG: Create file '{fix_pr_file}' with commit message '{commit_message}'")
-        file = repo.update_file(fix_pr_file, commit_message, file_contents, file.sha, branch=new_branch_name)
-
-    pr_body = '''
-SUMMARY
-Pull request submitted by Synopsys Black Duck in order to fix the following known security vulnerabilities:
-
-'''
-    pr_body = pr_body + fix_pr_annotation
-    if (debug):
-        print(f"DEBUG: Submitting pull request:")
-        print(pr_body)
-    pr = repo.create_pull(title="Black Duck: Fix known security vulnerabilities", body=pr_body, head=new_branch_name, base="master")
+        if (fix_pr_node['scheme'] == "npmjs"):
+            # For safety
+            shutil.copy2("package.json", "package-orig.json")
+            fix_pr_filename, local_filename = generate_fix_pr_npmjs(fix_pr_node['filename'], fix_pr_node['filename'] + ".local", fix_pr_node['componentName'], fix_pr_node['versionFrom'], fix_pr_node['versionTo'])
+            fix_pr_filename = remove_cwd_from_filename(fix_pr_filename)
+            github_commit_file_and_create_fixpr(g, github_token, github_api_url, github_repo, github_branch, fix_pr_filename, local_filename, fix_pr_node)
+        else:
+            print(f"INFO: Generating a Fix PR for packages of type '{fix_pr_node['scheme']}' is not supported yet")
 
 # Optionally comment on the pull request this is for
 
-# For debugging one by one
-#sys.exit(1)
+if (comment_pr):
+    github_token = os.getenv("GITHUB_TOKEN")
+    github_repo = os.getenv("GITHUB_REPOSITORY")
+    github_branch = os.getenv("GITHUB_REF")
+    github_api_url = os.getenv("GITHUB_API_URL")
+    github_sha = os.getenv("GITHUB_SHA")
 
+    if (github_token == None or github_repo == None or github_branch == None or github_api_url == None or github_sha == None):
+        print("ERROR: Cannot find GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_REF, GTIHUB_SHA and/or GITHUB_API_URL in the environment - are you running from a GitHub action?")
+        sys.exit(1)
 
-print("Done")
+    if (debug): print(f"DEBUG: Connect to GitHub at {github_api_url}")
+    g = Github(github_token, base_url=github_api_url)
+
+    if (debug): print(f"DEBUG: Look up GitHub repo '{github_repo}'")
+    repo = g.get_repo(github_repo)
+    if (debug): print(repo)
+
+    # TODO Should this handle other bases than master?
+    pulls = repo.get_pulls(state='open', sort='created', base='master')
+    pr = None
+    pr_commit = None
+    if (debug): print(f"DEBUG: Pull requests:")
+    for pull in pulls.reversed:
+        if (debug): print(f"DEBUG: Pull request number: {pull.number}")
+        # Can we find the current commit sha?
+        pull_number_for_sha = 0
+        commits = pull.get_commits()
+        for commit in commits.reversed:
+            if (debug): print(f"DEBUG:   Commit sha: " + str(commit.sha))
+            if (commit.sha == github_sha):
+                if (debug): print(f"DEBUG:     Found")
+                pull_number_for_sha = pull.number
+                pr = pull
+                pr_commit = commit
+                break
+        if (pull_number_for_sha != 0): break
+
+    if (pull_number_for_sha == 0):
+        print(f"ERROR: Unable to find pull request for commit '{github_sha}'")
+        sys.exit(1)
+
+    print("FIX PR DATA:")
+    print(fix_pr_data)
+
+    for fix_pr_node in fix_pr_data:
+        if (debug): print(f"DEUBG: Comment on Pull Request #{pr.number} for commit {github_sha} for component '{fix_pr_node['componentName']}'")
+        github_create_pull_request_comment(g, github_repo, pr, pr_commit, fix_pr_node)
