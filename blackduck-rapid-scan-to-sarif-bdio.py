@@ -488,7 +488,7 @@ for item in dev_scan_data['items']:
         if (vuln['vulnSeverity'] == "CRITITAL" or vuln['vulnSeverity'] == "HIGH"):
             defaultConfiguration['level'] = "error"
         elif (vuln['vulnSeverity'] == "MEDIUM"):
-            efaultConfiguration['level'] = "warning"
+            defaultConfiguration['level'] = "warning"
         else:
             defaultConfiguration['level'] = "note"
 
